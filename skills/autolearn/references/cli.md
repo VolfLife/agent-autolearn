@@ -58,6 +58,18 @@ uv run $AL/improve.py <command>       # behavioral rules + AGENTS.md escalation
 | `sync login/logout/export-key/push/pull/status` | Cross-machine E2E-encrypted sync |
 | `ui` | Launch the inspector UI |
 
+## evolution.py — measured skill evolution
+
+| Command | Purpose |
+|---------|---------|
+| `status [--json] [--limit N]` | Rank skills by deterministic failures, repeated use and approximate context cost (default: top 20; `--limit 0` = all) |
+| `inspect <name>` | Show the current skill, usage/verdict evidence, estimated tokens and evolution procedure |
+| `validate <name> <candidate.SKILL.md>` | Validate a proposed complete skill without changing the installed file |
+| `apply <name> <candidate.SKILL.md>` | Back up, validate and atomically apply an approved revision (autolearn-owned skills only) |
+| `restore <name> <backup.SKILL.md>` | Restore a retained backup after validation, while backing up the current version |
+
+Full procedure and safety model: [`references/evolution.md`](./evolution.md). Token counts are rough character/4 estimates, not exact tokenizer counts. Candidate generation, scoring and approval are performed by the reviewer; the CLI does not call a model or mutate skills automatically.
+
 ## improve.py — behavioral rules
 
 | Command | When | Purpose |

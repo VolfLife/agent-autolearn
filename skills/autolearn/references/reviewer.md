@@ -209,6 +209,31 @@ permanent savings. Do NOT skill-ify a trivial single `--help` that
 immediately answered the question (threshold: >=2 probing steps AND the
 tool recurs across sessions).
 
+### Step 7.5: Evolve an existing skill when evidence warrants it
+
+This is an optional extension of Step 7, not an additional skill mutation. Keep the **one skill change per review** limit: a review that already created or patched a skill must not also evolve another one.
+
+Load `references/evolution.md` only when an existing skill has a deterministic falsification failure, a concrete user correction, or a repeated and expensive context-cost problem. Do not run an optimizer for every skill.
+
+```bash
+AL="$HOME/.agents/skills/autolearn/scripts"
+uv run "$AL/evolution.py" status --json --limit 20
+uv run "$AL/evolution.py" inspect <skill-name>
+```
+
+Read the relevant wiki pattern and session evidence before proposing a change. Generate up to three meaningfully different candidates, score the original and candidates for failure coverage, trigger precision, clarity/actionability and estimated token cost, then select a Pareto-optimal option. “No improvement” is valid. Present the evidence, scores, token estimate and diff, and wait for explicit user approval.
+
+**Never treat a whole-session tool error as proof that every loaded skill failed.** Session-level outcomes are correlation unless a deterministic test or specific correction links the failure to the skill. The helper deliberately refuses manual, tracked-manual and pinned skills.
+
+After approval, use the helper's backup-and-validate path rather than editing the skill directly:
+
+```bash
+uv run "$AL/evolution.py" validate <skill-name> /path/to/candidate.SKILL.md
+uv run "$AL/evolution.py" apply <skill-name> /path/to/candidate.SKILL.md
+```
+
+Do not exceed one skill mutation in this review. The full protocol, rollback command and safety limits are in `references/evolution.md`.
+
 ### Step 8: Log review outcome
 
 After completing all actions (or determining nothing was recorded), log

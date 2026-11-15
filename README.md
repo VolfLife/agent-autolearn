@@ -215,6 +215,45 @@ Both CLIs ship inside the single `autolearn` skill:
 
 The observer mode records corrections in-session via `improve.py observe`; the reviewer does the same in batch (reviewer.md Step 4), and `improve.py escalate --apply` promotes repeated rules into the appropriate `AGENTS.md` file. Full escalation logic: [`skills/autolearn/references/observer.md`](skills/autolearn/references/observer.md).
 
+## Measured skill evolution
+
+Autolearn's existing Certified Procedures index already tracks skill loads, deterministic tool outcomes and step-level token costs. The evolution helper reuses skill-use counts and falsification verdicts, while estimating the permanent context cost of a skill from its own file size. It deliberately does not attribute an entire session's token spend or failures to individual skills.
+
+It adds a review workflow inspired by the companion `opencode-self-improving-skills` project:
+
+- **Evidence-ranked candidates** — deterministic falsification failures, repeated skill use and approximate context cost help identify where review is worthwhile.
+- **Pareto-style comparison** — the reviewer compares the original skill with up to three candidate revisions for failure coverage, trigger precision, clarity/actionability and estimated token cost. “No improvement” is a valid result.
+- **Human-gated changes** — the reviewer presents the evidence and diff and waits for approval. The helper never calls a model or rewrites a skill on its own.
+- **Backups and rollback** — approved changes are validated, atomically applied, backed up (10 versions per skill), and recorded with hashes and estimated token deltas.
+- **Ownership boundaries** — only unpinned skills created by autolearn can be changed. User-installed and tool-managed skills remain observe-only.
+
+The workflow deliberately does **not** assign every session failure to every skill loaded in that session. Correlation is not causation; deterministic verification and specific user corrections are stronger evidence.
+
+### Quick inspection
+
+```bash
+AL="$HOME/.agents/skills/autolearn/scripts"
+
+# Rank skills worth reviewing
+uv run "$AL/evolution.py" status --limit 10
+
+# Get the evidence dossier for one skill
+uv run "$AL/evolution.py" inspect <skill-name>
+
+# Validate a complete candidate without changing the installed skill
+uv run "$AL/evolution.py" validate <skill-name> /path/to/candidate.SKILL.md
+
+# After explicit user approval: back up, validate and atomically apply
+uv run "$AL/evolution.py" apply <skill-name> /path/to/candidate.SKILL.md
+
+# Restore a retained backup (the current version is backed up first)
+uv run "$AL/evolution.py" restore <skill-name> /path/to/backup.SKILL.md
+```
+
+See [`skills/autolearn/references/evolution.md`](skills/autolearn/references/evolution.md) for the candidate-generation rubric, evidence requirements, approval gate and safety details.
+
+Status returns the top 20 rows by default (or fewer with `--limit N`; use `--limit 0` for all), so large skill libraries do not flood the agent's context. **Token estimates are approximate** (characters divided by four), not exact provider-token counts. The reviewer performs semantic candidate generation and scoring; the CLI handles ranking, validation, backup, apply and rollback.
+
 ## Data layout
 
 ```text

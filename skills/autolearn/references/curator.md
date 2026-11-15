@@ -71,6 +71,22 @@ For each cluster of narrow skills:
 uv run $HOME/.agents/skills/autolearn/scripts/autolearn.py skill archive <narrow-skill-name>
 ```
 
+### Step 4.5: Audit measured skill health
+
+Run the read-only ranking to identify skills worth investigating:
+
+```bash
+uv run $HOME/.agents/skills/autolearn/scripts/evolution.py status
+```
+
+For a candidate with a deterministic failure or a large, frequently-used body, inspect its evidence:
+
+```bash
+uv run $HOME/.agents/skills/autolearn/scripts/evolution.py inspect <skill-name>
+```
+
+The curator may report and recommend candidates, but must not rewrite skills automatically. Only unpinned skills created by autolearn are eligible for the helper's apply path. Manual/tool-managed skills remain observe-only. Follow `references/evolution.md` for Pareto evaluation and explicit approval.
+
 ### Step 5: Report
 
 ```text
