@@ -194,6 +194,8 @@ OK=true
 [[ -f "$SKILLS_DIR/autolearn/SKILL.md" ]] || { echo "  MISSING: skills/autolearn"; OK=false; }
 [[ -f "$SKILLS_DIR/autolearn/scripts/autolearn.py" ]] || { echo "  MISSING: skills/autolearn/scripts/autolearn.py"; OK=false; }
 [[ -f "$SKILLS_DIR/autolearn/scripts/improve.py" ]] || { echo "  MISSING: skills/autolearn/scripts/improve.py"; OK=false; }
+[[ -f "$SKILLS_DIR/autolearn/scripts/evolution.py" ]] || { echo "  MISSING: skills/autolearn/scripts/evolution.py"; OK=false; }
+[[ -f "$SKILLS_DIR/autolearn/references/evolution.md" ]] || { echo "  MISSING: skills/autolearn/references/evolution.md"; OK=false; }
 [[ -f "$HOME/.autolearn/personas/default/memory.context.md" ]] || { echo "  MISSING: ~/.autolearn/personas/default/memory.context.md"; OK=false; }
 [[ -f "$HOME/.autolearn/personas/default/memories.jsonl" ]] || { echo "  MISSING: ~/.autolearn/personas/default/memories.jsonl"; OK=false; }
 

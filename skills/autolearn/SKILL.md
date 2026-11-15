@@ -35,6 +35,7 @@ which reference to load:
 | Observer | The main agent, every session (trigger lives in the description) | `~/.agents/skills/autolearn/references/observer.md` |
 | Reviewer | The `autolearn-reviewer` subagent spawned by the plugin | `~/.agents/skills/autolearn/references/reviewer.md` |
 | Curator | A scheduled maintenance job (weekly by default) | `~/.agents/skills/autolearn/references/curator.md` |
+| Evolution | Reviewer, only when there is concrete evidence to improve an existing skill | `~/.agents/skills/autolearn/references/evolution.md` |
 
 ## Trigger details (from pre-compression description, preserved verbatim)
 
@@ -147,6 +148,10 @@ broadly, replace the narrow entry with the general one.
 - **Never touch user-installed skills** — only skills autolearn created.
 - **Never write secrets** to memory, profiles, or skills.
 - **Prefer strengthen over add** for semantic duplicates in the registry.
+
+## Measured Skill Evolution
+
+When a reviewer finds a concrete failure, correction, or significant context-cost issue in an existing skill, it may load `references/evolution.md`. This workflow ranks candidates from existing usage and deterministic falsification evidence, compares candidate revisions on quality and estimated token cost, and requires explicit user approval before a backed-up replacement. It never infers that every skill loaded in a failed session caused the failure.
 
 ## Data Layout
 
