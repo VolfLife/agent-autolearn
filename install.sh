@@ -88,7 +88,10 @@ for executable in ('opencode2', 'opencode'):
             break
     except (OSError, subprocess.SubprocessError):
         pass
-is_opencode_v2 = opencode_major is not None and opencode_major >= 2
+is_opencode_v2 = (
+    (opencode_major is not None and opencode_major >= 2)
+    or shutil.which('opencode2') is not None
+)
 if is_opencode_v2:
     legacy_plugin_file = os.path.join(os.path.dirname(path), 'plugins', 'autolearn.js')
     if os.path.exists(legacy_plugin_file):
@@ -188,32 +191,33 @@ elif data['agent']['autolearn-reviewer'].get('prompt') != reviewer_prompt:
     data['agent']['autolearn-reviewer']['prompt'] = reviewer_prompt
     changed = True
 
-# OpenCode v2 uses the plural `agents` key and requires a runnable
-# agent mode. Keep the legacy singular `agent` entry above for v1.
-if 'agents' not in data or not isinstance(data['agents'], dict):
-    data['agents'] = {}
-reviewer_v2_prompt = (
-    'You are the autolearn reviewer. Read '
-    + os.path.expanduser('~/.agents/skills/autolearn/SKILL.md')
-    + ' first, then read '
-    + os.path.expanduser('~/.agents/skills/autolearn/references/reviewer.md')
-    + ' and follow its Action Protocol exactly. The conversation slice to '
-    'review is the current prompt. Take action only in the autolearn store; '
-    'never modify project source code.'
-)
-reviewer_v2 = data['agents'].setdefault('autolearn-reviewer', {})
-if not isinstance(reviewer_v2, dict):
-    reviewer_v2 = {}
-    data['agents']['autolearn-reviewer'] = reviewer_v2
-for key, value in {
-    'description': 'Autolearn reviewer: extracts durable lessons from conversation slices',
-    'mode': 'all',
-    'prompt': reviewer_v2_prompt,
-}.items():
-    if reviewer_v2.get(key) != value:
-        reviewer_v2[key] = value
-        changed = True
-
+if is_opencode_v2:
+    # OpenCode v2 uses the plural `agents` key and requires a runnable
+    # agent mode. Keep the legacy singular `agent` entry above for v1.
+    if 'agents' not in data or not isinstance(data['agents'], dict):
+        data['agents'] = {}
+    reviewer_v2_prompt = (
+        'You are the autolearn reviewer. Read '
+        + os.path.expanduser('~/.agents/skills/autolearn/SKILL.md')
+        + ' first, then read '
+        + os.path.expanduser('~/.agents/skills/autolearn/references/reviewer.md')
+        + ' and follow its Action Protocol exactly. The conversation slice to '
+        'review is the current prompt. Take action only in the autolearn store; '
+        'never modify project source code.'
+    )
+    reviewer_v2 = data['agents'].setdefault('autolearn-reviewer', {})
+    if not isinstance(reviewer_v2, dict):
+        reviewer_v2 = {}
+        data['agents']['autolearn-reviewer'] = reviewer_v2
+    for key, value in {
+        'description': 'Autolearn reviewer: extracts durable lessons from conversation slices',
+        'mode': 'all',
+        'prompt': reviewer_v2_prompt,
+    }.items():
+        if reviewer_v2.get(key) != value:
+            reviewer_v2[key] = value
+            changed = True
+    
 with open(path, 'w') as f:
     json.dump(data, f, indent=2)
     f.write('\n')
