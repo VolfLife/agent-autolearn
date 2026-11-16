@@ -309,12 +309,17 @@ if [ "\$1" = "--curator" ]; then
       cat "\$CERR" >> "\$ERROR_LOG"
     fi
     CSID=\$(sed -n 's/.*"sessionID"[[:space:]]*:[[:space:]]*"\\([^"]*\\)".*/\\1/p' "\$COUT" | head -1)
-    rm -f "\$COUT" "\$CERR"
     if [ "\$CEXIT" -ne 0 ] || [ -z "\$CSID" ]; then
+      if [ -s "\$COUT" ]; then
+        printf '[%s] curator stdout\n' "\$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "\$ERROR_LOG"
+        cat "\$COUT" >> "\$ERROR_LOG"
+      fi
+      rm -f "\$COUT" "\$CERR"
       [ "\$CEXIT" -ne 0 ] || CEXIT=1
       log_failure "\$CEXIT" "curator"
       exit "\$CEXIT"
     fi
+    rm -f "\$COUT" "\$CERR"
     case "\$(basename "\$OC")" in
       opencode2) "\$OC" api delete "/api/session/\$CSID" >/dev/null 2>&1 ;;
       *)         "\$OC" session delete "\$CSID" >/dev/null 2>&1 ;;
@@ -404,12 +409,17 @@ fi
 # both binaries emit "run --format json" as JSONL with a top-level
 # "sessionID" on every line, so line-by-line sed extraction is safe.
 SID=\$(sed -n 's/.*"sessionID"[[:space:]]*:[[:space:]]*"\\([^"]*\\)".*/\\1/p' "\$OUT" | head -1)
-rm -f "\$OUT" "\$ERR"
 if [ "\$REVIEW_EXIT" -ne 0 ] || [ -z "\$SID" ]; then
+  if [ -s "\$OUT" ]; then
+    printf '[%s] review stdout\n' "\$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "\$ERROR_LOG"
+    cat "\$OUT" >> "\$ERROR_LOG"
+  fi
+  rm -f "\$OUT" "\$ERR"
   [ "\$REVIEW_EXIT" -ne 0 ] || REVIEW_EXIT=1
   log_failure "\$REVIEW_EXIT" "review"
   exit "\$REVIEW_EXIT"
 fi
+rm -f "\$OUT" "\$ERR"
 if [ -n "\$SID" ]; then
   case "\$(basename "\$OC")" in
     opencode2) "\$OC" api delete "/api/session/\$SID" >/dev/null 2>&1 ;;
