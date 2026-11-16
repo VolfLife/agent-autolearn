@@ -283,6 +283,18 @@ const failedRun = spawnWrapper(["--curator"], {
   timeout: 15000,
 })
 ok(failedRun.status === 7, "failed reviewer subprocess exit code is propagated")
+// A missing min_interval_ms must retain the documented 3-minute default.
+writeFileSync(cfg, "review_threshold: 10\\n")
+writeFileSync(join(HOME, ".last_wrapper_review"), `${Math.floor(Date.now() / 1000)}:\\n`)
+const defaultIntervalReview = join(HOME, "default-interval-review.md")
+writeFileSync(defaultIntervalReview, "# Autolearn Review\\n\\n## Conversation\\n\\nDEFAULT-INTERVAL-MARKER\\n")
+const beforeDefaultInterval = fakeLines().length
+const defaultIntervalRun = spawnWrapper([defaultIntervalReview, "--agent", "autolearn-reviewer"], {
+  ...env, encoding: "utf-8", timeout: 15000,
+})
+ok(defaultIntervalRun.status === 0, "missing min_interval_ms does not break wrapper arithmetic")
+ok(fakeLines().length === beforeDefaultInterval, "default 3-minute interval still suppresses an immediate review")
+
 const errorLog = readFileSync(join(HOME, "review-errors.log"), "utf-8")
 ok(errorLog.includes("Agent not found: autolearn-reviewer"), "reviewer stdout is preserved in review-errors.log")
 const failedObs = readFileSync(OBS_FILE, "utf-8")
