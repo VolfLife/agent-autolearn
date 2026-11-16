@@ -457,3 +457,54 @@ def test_curator_run_skips_legacy_user_entries_too(isolated_env):
     usage = json.loads(ns.usage_file.read_text())
     assert usage["legacy-skill"]["state"] == "active"
     assert usage["legacy-skill"]["created_by"] == "user"
+
+# ---------------------------------------------------------------------------
+# LH-PRUNE-001 — pruning must require valid usage evidence
+# ---------------------------------------------------------------------------
+
+def test_pruner_skips_when_opencode_schema_is_unsupported(isolated_env):
+    ns = isolated_env
+    ancient = "2020-01-01"
+    _make_skill_on_disk(ns.skills_dir, "old-skill")
+    ns.usage_file.write_text(json.dumps({
+        "old-skill": {
+            "created_by": "autolearn", "created_at": ancient,
+            "use_count": 0, "last_activity_at": ancient,
+            "state": "active", "pinned": False,
+        }
+    }))
+    # Existing DB file, but no supported v1 or v2 tables.
+    conn = sqlite3.connect(str(ns.opencode_db))
+    conn.execute("CREATE TABLE unrelated(id TEXT)")
+    conn.commit()
+    conn.close()
+
+    result = autolearn.prune_unused_skills({"unused_grace_days": 1})
+    assert result["archived"] == []
+    assert result.get("skipped")
+    assert (ns.skills_dir / "old-skill" / "SKILL.md").exists()
+    usage = json.loads(ns.usage_file.read_text())
+    assert usage["old-skill"]["state"] == "active"
+
+
+def test_pruner_uses_validated_index_instead_of_stale_zero_count(isolated_env):
+    ns = isolated_env
+    ancient = "2020-01-01"
+    _make_skill_on_disk(ns.skills_dir, "actually-used")
+    _make_opencode_db(ns.opencode_db, [("actually-used", 1_000)])
+    ns.usage_file.write_text(json.dumps({
+        "actually-used": {
+            "created_by": "autolearn", "created_at": ancient,
+            "use_count": 0, "last_activity_at": ancient,
+            "state": "active", "pinned": False,
+        }
+    }))
+
+    result = autolearn.prune_unused_skills({"unused_grace_days": 1})
+    assert result["archived"] == []
+    assert result["usage_verified"] is True
+    usage = json.loads(ns.usage_file.read_text())
+    assert usage["actually-used"]["use_count"] == 1
+    assert usage["actually-used"]["state"] == "active"
+    assert (ns.skills_dir / "actually-used" / "SKILL.md").exists()
+
