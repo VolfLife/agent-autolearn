@@ -165,10 +165,12 @@ if 'agents' not in data or not isinstance(data['agents'], dict):
     data['agents'] = {}
 reviewer_v2_prompt = (
     'You are the autolearn reviewer. Read '
+    + os.path.expanduser('~/.agents/skills/autolearn/SKILL.md')
+    + ' first, then read '
     + os.path.expanduser('~/.agents/skills/autolearn/references/reviewer.md')
-    + ' and follow its Action Protocol exactly. The shared signal taxonomy '
-    'is in SKILL.md. The conversation slice to review is the current prompt. '
-    'Take action only in the autolearn store; never modify project source code.'
+    + ' and follow its Action Protocol exactly. The conversation slice to '
+    'review is the current prompt. Take action only in the autolearn store; '
+    'never modify project source code.'
 )
 reviewer_v2 = data['agents'].setdefault('autolearn-reviewer', {})
 if not isinstance(reviewer_v2, dict):
