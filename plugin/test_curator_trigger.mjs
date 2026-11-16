@@ -147,7 +147,7 @@ ok(existsSync(WRAPPER_SCRIPT), "ensureStore installed the wrapper")
 const FAKE_LOG = join(HOME, "fake-oc.log")
 const fakeOc = join(HOME, "fake-oc")
 writeFileSync(fakeOc, `#!/bin/sh
-printf '%s\\n' "$*" >> "$FAKE_OC_LOG"
+printf '%s\n' "$*" >> "$FAKE_OC_LOG"
 if [ "$1" = "run" ]; then
   # The wrapper streams the review file on stdin (argv stays small, issue
   # #21); log it so content flow is observable.
@@ -284,10 +284,10 @@ const failedRun = spawnWrapper(["--curator"], {
 })
 ok(failedRun.status === 7, "failed reviewer subprocess exit code is propagated")
 // A missing min_interval_ms must retain the documented 3-minute default.
-writeFileSync(cfg, "review_threshold: 10\\n")
-writeFileSync(join(HOME, ".last_wrapper_review"), `${Math.floor(Date.now() / 1000)}:\\n`)
+writeFileSync(cfg, "review_threshold: 10\n")
+writeFileSync(join(HOME, ".last_wrapper_review"), `${Math.floor(Date.now() / 1000)}:\n`)
 const defaultIntervalReview = join(HOME, "default-interval-review.md")
-writeFileSync(defaultIntervalReview, "# Autolearn Review\\n\\n## Conversation\\n\\nDEFAULT-INTERVAL-MARKER\\n")
+writeFileSync(defaultIntervalReview, "# Autolearn Review\n\n## Conversation\n\nDEFAULT-INTERVAL-MARKER\n")
 const beforeDefaultInterval = fakeLines().length
 const defaultIntervalRun = spawnWrapper([defaultIntervalReview, "--agent", "autolearn-reviewer"], {
   ...env, encoding: "utf-8", timeout: 15000,
