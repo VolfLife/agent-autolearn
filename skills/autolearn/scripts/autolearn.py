@@ -1435,7 +1435,15 @@ def cmd_search_init(args):
     last_v2_mark_row = sconn.execute(
         "SELECT value FROM index_state WHERE key = 'last_v2_message_time'"
     ).fetchone()
-    last_v2_mark = int(last_v2_mark_row["value"]) if last_v2_mark_row else 0
+    last_v2_time, last_v2_id = 0, ""
+    if last_v2_mark_row:
+        raw_mark = str(last_v2_mark_row["value"])
+        mark_time, separator, mark_id = raw_mark.partition("|")
+        try:
+            last_v2_time = int(mark_time)
+            last_v2_id = mark_id if separator else ""
+        except ValueError:
+            last_v2_time, last_v2_id = 0, ""
 
     session_cache: dict[str, dict] = {}
 
@@ -1449,7 +1457,9 @@ def cmd_search_init(args):
         # exact beta schema.
         if _opencode_has_table(db_conn, "session_v2"):
             cols = _opencode_table_columns(db_conn, "session_v2")
-            selected = ["id", "title", "time_created"]
+            selected = ["id", "time_created"]
+            if "title" in cols:
+                selected.append("title")
             if "directory" in cols:
                 selected.append("directory")
             if "project_id" in cols:
@@ -1574,17 +1584,20 @@ def cmd_search_init(args):
         SELECT sm.id AS msg_id, sm.session_id, sm.type AS role,
                sm.time_created, sm.data AS msg_data
         FROM session_message sm
-        WHERE sm.time_created > ?
+        WHERE sm.time_created > ? OR (sm.time_created = ? AND sm.id > ?)
     """
     if has_v1_message_table:
         v2_sql += "  AND NOT EXISTS (SELECT 1 FROM message m WHERE m.id = sm.id)\n"
-    v2_sql += "        ORDER BY sm.time_created ASC"
+    v2_sql += "        ORDER BY sm.time_created ASC, sm.id ASC"
     try:
-        v2_cursor = db_conn.execute(v2_sql, [last_v2_mark])
+        v2_cursor = db_conn.execute(v2_sql, [last_v2_time, last_v2_time, last_v2_id])
     except sqlite3.OperationalError:
         v2_cursor = None
 
+    v2_high_time, v2_high_id = last_v2_time, last_v2_id
     for row in (v2_cursor or []):
+        v2_high_time = int(row["time_created"] or 0)
+        v2_high_id = str(row["msg_id"])
         if row["role"] not in ("user", "assistant"):
             continue
         try:
@@ -1617,13 +1630,12 @@ def cmd_search_init(args):
             )
             v2_count += 1
 
-        if row["time_created"] > v2_max_time:
-            v2_max_time = row["time_created"]
-
-    if v2_max_time > last_v2_mark:
+    if v2_high_time > last_v2_time or (
+        v2_high_time == last_v2_time and v2_high_id > last_v2_id
+    ):
         sconn.execute(
             "INSERT OR REPLACE INTO index_state (key, value) VALUES ('last_v2_message_time', ?)",
-            [str(v2_max_time)],
+            [f"{v2_high_time}|{v2_high_id}"],
         )
 
     sconn.execute("INSERT INTO session_text(session_text) VALUES ('rebuild')")
