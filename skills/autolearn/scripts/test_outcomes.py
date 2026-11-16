@@ -301,3 +301,115 @@ def test_missing_opencode_db_returns_no_db_marker(env):
     assert s.get("no_opencode_db") is True
     assert s["tool_parts"] == 0
     idx.close()
+
+# ---------------------------------------------------------------------------
+# OpenCode v2 message/content schema
+# ---------------------------------------------------------------------------
+
+def _make_opencode_v2_db(path: Path, messages: list[dict]) -> None:
+    conn = sqlite3.connect(str(path))
+    conn.executescript(
+        """
+        CREATE TABLE session_v2 (
+            id TEXT PRIMARY KEY,
+            directory TEXT NOT NULL,
+            time_created INTEGER NOT NULL
+        );
+        CREATE TABLE session_message (
+            id TEXT PRIMARY KEY,
+            session_id TEXT NOT NULL,
+            time_created INTEGER NOT NULL,
+            type TEXT NOT NULL,
+            data TEXT NOT NULL
+        );
+        """
+    )
+    conn.execute(
+        "INSERT INTO session_v2(id, directory, time_created) VALUES(?,?,?)",
+        ["s1", "/workspace/demo", 100],
+    )
+    for msg in messages:
+        conn.execute(
+            "INSERT INTO session_message(id, session_id, time_created, type, data) "
+            "VALUES(?,?,?,?,?)",
+            [msg["id"], "s1", msg["time_created"], "assistant",
+             json.dumps({"content": msg["content"]})],
+        )
+    conn.commit()
+    conn.close()
+
+
+def test_v2_indexes_tool_calls_and_skill_loads(env):
+    ocdb, persona = env
+    _make_opencode_v2_db(ocdb, [
+        {
+            "id": "m1", "time_created": 1000,
+            "content": [
+                {"type": "tool", "name": "bash", "state": {
+                    "status": "completed",
+                    "input": {"command": "uv run pytest -q"},
+                    "output": "2 passed",
+                    "metadata": {"exit": 0},
+                }},
+                {"type": "tool", "name": "skill", "state": {
+                    "status": "completed", "input": {"id": "autolearn"},
+                    "output": "loaded",
+                }},
+                {"type": "text", "text": "ignored"},
+            ],
+        },
+    ])
+    idx = outcomes.OutcomeIndex(persona / outcomes.OUTCOMES_DB_NAME, ocdb)
+    summary = idx.index()
+    assert summary["tool_parts"] == 2
+    assert summary["skill_loads"] == 1
+    rows = idx.list_tool_outcomes()
+    assert [r["tool"] for r in rows] == ["bash", "skill"]
+    bash = next(r for r in rows if r["tool"] == "bash")
+    assert json.loads(bash["input_json"])["command"] == "uv run pytest -q"
+    assert bash["gt_strength"] == 4
+    assert idx.skill_use_counts() == {"autolearn": 1}
+    idx.close()
+
+
+def test_v2_incremental_cursor_does_not_duplicate_content_parts(env):
+    ocdb, persona = env
+    _make_opencode_v2_db(ocdb, [
+        {
+            "id": "m1", "time_created": 1000,
+            "content": [
+                {"type": "tool", "name": "bash", "state": {
+                    "status": "completed", "input": {"command": "echo one"}, "output": "one"
+                }},
+                {"type": "tool", "name": "grep", "state": {
+                    "status": "completed", "input": {"pattern": "x"}, "output": "x"
+                }},
+            ],
+        },
+    ])
+    idx = outcomes.OutcomeIndex(persona / outcomes.OUTCOMES_DB_NAME, ocdb)
+    assert idx.index()["tool_parts"] == 2
+    assert idx.index()["tool_parts"] == 0
+    assert len(idx.list_tool_outcomes()) == 2
+    idx.close()
+
+
+def test_unsupported_schema_does_not_clear_existing_index_on_full_rebuild(env):
+    ocdb, persona = env
+    _make_opencode_db(ocdb, [_tool_part("p1", "s1", 1000, "bash", output="keep")])
+    idx = outcomes.OutcomeIndex(persona / outcomes.OUTCOMES_DB_NAME, ocdb)
+    idx.index()
+    idx.close()
+
+    # Replace the source with a DB that exists but has neither supported schema.
+    conn = sqlite3.connect(str(ocdb))
+    conn.executescript("DROP TABLE part; CREATE TABLE unrelated(id TEXT);")
+    conn.commit()
+    conn.close()
+
+    idx = outcomes.OutcomeIndex(persona / outcomes.OUTCOMES_DB_NAME, ocdb)
+    summary = idx.index(full=True)
+    assert summary["unsupported_schema"] is True
+    assert len(idx.list_tool_outcomes()) == 1
+    idx.close()
+

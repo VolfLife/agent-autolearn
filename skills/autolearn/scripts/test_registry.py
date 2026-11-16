@@ -147,3 +147,22 @@ def test_migration_with_zero_records_materializes_registry(tmp_path):
     assert records == []
     assert reg.path.exists()  # memories.jsonl materialized even though empty
     assert reg.load() == []   # readable, still empty
+
+def test_duplicate_add_reinforces_without_creating_a_second_record(tmp_path, monkeypatch):
+    reg = R.MemoryRegistry(persona(tmp_path))
+    dates = iter(["2026-11-01", "2026-11-02"])
+    monkeypatch.setattr(R, "today", lambda: next(dates))
+    first = reg.add("Prefer deterministic tests")
+    repeated = reg.add("Prefer deterministic tests")
+    records = reg.load()
+    assert len(records) == 1
+    assert repeated["id"] == first["id"]
+    assert repeated["reinforcements"] == ["2026-11-02"]
+
+
+def test_debug_log_respects_autolearn_home(tmp_path, monkeypatch):
+    custom_home = tmp_path / "custom-autolearn"
+    monkeypatch.setenv("AUTOLEARN_HOME", str(custom_home))
+    R.debug_log(tmp_path / "persona", "isolated diagnostic")
+    assert "isolated diagnostic" in (custom_home / "debug.log").read_text()
+

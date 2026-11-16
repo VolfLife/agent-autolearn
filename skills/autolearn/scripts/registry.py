@@ -199,7 +199,11 @@ class MemoryRegistry:
             topics: list[str] | None = None) -> dict:
         existing = self.find_by_text(text)
         if existing is not None:
-            return existing
+            # An exact repeat is a reinforcement signal, not a second record.
+            # The registry's same-day guard keeps repeated retries from
+            # inflating reinforcement counts.
+            self.reinforce(existing["id"])
+            return self.get(existing["id"]) or existing
         rec = new_record(text, type, pinned=pinned, topics=topics)
         records = self.load()
         records.append(rec)
@@ -378,9 +382,11 @@ def migrate_from_legacy(persona_dir: Path) -> int:
 
 
 def debug_log(persona_dir: Path, msg: str) -> None:
-    """Best-effort debug log alongside the autolearn debug.log convention."""
+    """Best-effort debug log under the active AUTOLEARN_HOME."""
     try:
-        with (Path.home() / ".autolearn" / "debug.log").open("a", encoding="utf-8") as fh:
+        home = Path(os.environ.get("AUTOLEARN_HOME", Path.home() / ".autolearn"))
+        home.mkdir(parents=True, exist_ok=True)
+        with (home / "debug.log").open("a", encoding="utf-8") as fh:
             fh.write(f"[registry] {msg}\n")
     except OSError:
         pass

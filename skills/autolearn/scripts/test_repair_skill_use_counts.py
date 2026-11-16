@@ -457,3 +457,176 @@ def test_curator_run_skips_legacy_user_entries_too(isolated_env):
     usage = json.loads(ns.usage_file.read_text())
     assert usage["legacy-skill"]["state"] == "active"
     assert usage["legacy-skill"]["created_by"] == "user"
+
+# ---------------------------------------------------------------------------
+# LH-PRUNE-001 — pruning must require valid usage evidence
+# ---------------------------------------------------------------------------
+
+def test_pruner_skips_when_opencode_schema_is_unsupported(isolated_env):
+    ns = isolated_env
+    ancient = "2020-01-01"
+    _make_skill_on_disk(ns.skills_dir, "old-skill")
+    ns.usage_file.write_text(json.dumps({
+        "old-skill": {
+            "created_by": "autolearn", "created_at": ancient,
+            "use_count": 0, "last_activity_at": ancient,
+            "state": "active", "pinned": False,
+        }
+    }))
+    # Existing DB file, but no supported v1 or v2 tables.
+    conn = sqlite3.connect(str(ns.opencode_db))
+    conn.execute("CREATE TABLE unrelated(id TEXT)")
+    conn.commit()
+    conn.close()
+
+    result = autolearn.prune_unused_skills({"unused_grace_days": 1})
+    assert result["archived"] == []
+    assert result.get("skipped")
+    assert (ns.skills_dir / "old-skill" / "SKILL.md").exists()
+    usage = json.loads(ns.usage_file.read_text())
+    assert usage["old-skill"]["state"] == "active"
+
+
+def test_pruner_uses_validated_index_instead_of_stale_zero_count(isolated_env):
+    ns = isolated_env
+    ancient = "2020-01-01"
+    _make_skill_on_disk(ns.skills_dir, "actually-used")
+    _make_opencode_db(ns.opencode_db, [("actually-used", 1_000)])
+    ns.usage_file.write_text(json.dumps({
+        "actually-used": {
+            "created_by": "autolearn", "created_at": ancient,
+            "use_count": 0, "last_activity_at": ancient,
+            "state": "active", "pinned": False,
+        }
+    }))
+
+    result = autolearn.prune_unused_skills({"unused_grace_days": 1})
+    assert result["archived"] == []
+    assert result["usage_verified"] is True
+    usage = json.loads(ns.usage_file.read_text())
+    assert usage["actually-used"]["use_count"] == 1
+    assert usage["actually-used"]["state"] == "active"
+    assert (ns.skills_dir / "actually-used" / "SKILL.md").exists()
+
+# ---------------------------------------------------------------------------
+# OpenCode v2 search index — message content and composite cursor
+# ---------------------------------------------------------------------------
+
+def _open_search_db(path: Path) -> sqlite3.Connection:
+    conn = sqlite3.connect(str(path))
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def _make_opencode_v2_search_db(path: Path, messages: list[tuple[str, int, str, str]]) -> None:
+    conn = sqlite3.connect(str(path))
+    conn.executescript(
+        """
+        CREATE TABLE session_v2 (
+            id TEXT PRIMARY KEY,
+            directory TEXT NOT NULL,
+            title TEXT,
+            time_created INTEGER NOT NULL
+        );
+        CREATE TABLE session_message (
+            id TEXT PRIMARY KEY,
+            session_id TEXT NOT NULL,
+            time_created INTEGER NOT NULL,
+            type TEXT NOT NULL,
+            data TEXT NOT NULL
+        );
+        """
+    )
+    conn.execute(
+        "INSERT INTO session_v2(id, directory, title, time_created) VALUES(?,?,?,?)",
+        ["s1", "/workspace/project-a", "Project A", 100],
+    )
+    for msg_id, timestamp, role, text in messages:
+        conn.execute(
+            "INSERT INTO session_message(id, session_id, time_created, type, data) "
+            "VALUES(?,?,?,?,?)",
+            [msg_id, "s1", timestamp, role,
+             json.dumps({"content": [{"type": "text", "text": text}]})],
+        )
+    conn.commit()
+    conn.close()
+
+
+def test_search_init_indexes_v2_messages_and_same_timestamp_incrementally(
+    isolated_env, monkeypatch, tmp_path
+):
+    ns = isolated_env
+    _make_opencode_v2_search_db(
+        ns.opencode_db,
+        [("m1", 1000, "user", "Please explain the v2 database schema.")],
+    )
+    search_db = tmp_path / "search.db"
+    monkeypatch.setattr(
+        autolearn, "get_search_conn",
+        lambda: _open_search_db(search_db),
+    )
+
+    args = type("Args", (), {"full": True})()
+    autolearn.cmd_search_init(args)
+
+    conn = sqlite3.connect(str(search_db))
+    rows = conn.execute(
+        "SELECT session_id, message_id, role, text, project FROM session_text_content"
+    ).fetchall()
+    assert rows == [("s1", "m1", "user", "Please explain the v2 database schema.", "project-a")]
+    conn.close()
+
+    # A second message with the same millisecond timestamp must not be skipped.
+    conn = sqlite3.connect(str(ns.opencode_db))
+    conn.execute(
+        "INSERT INTO session_message(id, session_id, time_created, type, data) "
+        "VALUES(?,?,?,?,?)",
+        ["m2", "s1", 1000, "user",
+         json.dumps({"content": [{"type": "text", "text": "A second same-time message."}]})],
+    )
+    conn.commit()
+    conn.close()
+
+    autolearn.cmd_search_init(type("Args", (), {"full": False})())
+    conn = sqlite3.connect(str(search_db))
+    rows = conn.execute(
+        "SELECT message_id, text FROM session_text_content ORDER BY message_id"
+    ).fetchall()
+    assert rows == [
+        ("m1", "Please explain the v2 database schema."),
+        ("m2", "A second same-time message."),
+    ]
+    conn.close()
+
+
+def test_search_init_rejects_unknown_schema_before_full_clear(
+    isolated_env, monkeypatch, tmp_path
+):
+    ns = isolated_env
+    # Seed an existing FTS-backed index that must survive the unsupported source.
+    search_db = tmp_path / "search-existing.db"
+    monkeypatch.setattr(
+        autolearn, "get_search_conn",
+        lambda: sqlite3.connect(str(search_db)),
+    )
+    conn = sqlite3.connect(str(search_db))
+    autolearn.init_search_schema(conn)
+    conn.execute(
+        "INSERT INTO session_text_content(session_id, message_id, role, text, project, timestamp) "
+        "VALUES('s', 'm', 'user', 'preserve this entry', '', 1)"
+    )
+    conn.commit()
+    conn.close()
+
+    source = sqlite3.connect(str(ns.opencode_db))
+    source.execute("CREATE TABLE unrelated(id TEXT)")
+    source.commit()
+    source.close()
+
+    with pytest.raises(SystemExit):
+        autolearn.cmd_search_init(type("Args", (), {"full": True})())
+
+    conn = sqlite3.connect(str(search_db))
+    assert conn.execute("SELECT COUNT(*) FROM session_text_content").fetchone()[0] == 1
+    conn.close()
+

@@ -247,6 +247,18 @@ LOCK="\$AL/.last_wrapper_review"
 # Default 3 min: serialize bursts machine-wide without starving cadence.
 # (The in-plugin dedupe gate handles the same-conversation case.)
 MIN_INTERVAL_MS=180000
+MIN_INTERVAL="\$MIN_INTERVAL_MS"
+ERROR_LOG="\$AL/review-errors.log"
+OBS="\$AL/personas/default/observations.jsonl"
+mkdir -p "\$(dirname "\$ERROR_LOG")" "\$(dirname "\$OBS")" 2>/dev/null
+log_failure() {
+  FAIL_CODE="\$1"
+  FAIL_TRIGGER="\$2"
+  FAIL_TIME=\$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  printf '[%s] %s failed (exit %s)\n' "\$FAIL_TIME" "\$FAIL_TRIGGER" "\$FAIL_CODE" >> "\$ERROR_LOG"
+  printf '{"type":"review_failed","trigger":"%s","exit_code":%s,"timestamp":"%s"}\n' \
+    "\$FAIL_TRIGGER" "\$FAIL_CODE" "\$FAIL_TIME" >> "\$OBS"
+}
 CFG="\$AL/personas/default/config.yaml"
 if [ -f "\$CFG" ]; then
   MI=\$(sed -n 's/^min_interval_ms:[[:space:]]*//p' "\$CFG" | head -1 | tr -d '[:space:]')
@@ -286,15 +298,32 @@ if [ "\$1" = "--curator" ]; then
     printf '%s' "\$CPROMPT" | "\$OC" -p --no-session -na >/dev/null 2>&1
   else
     COUT=\$(mktemp "\${TMPDIR:-/tmp}/alcurator.XXXXXX")
-    "\$OC" run --format json --agent autolearn-reviewer "\$CPROMPT" > "\$COUT" 2>/dev/null
-    CSID=\$(sed -n 's/.*"sessionID"[[:space:]]*:[[:space:]]*"\\([^"]*\\)".*/\\1/p' "\$COUT" | head -1)
-    rm -f "\$COUT"
-    if [ -n "\$CSID" ]; then
-      case "\$(basename "\$OC")" in
-        opencode2) "\$OC" api delete "/api/session/\$CSID" >/dev/null 2>&1 ;;
-        *)         "\$OC" session delete "\$CSID" >/dev/null 2>&1 ;;
-      esac
+    CERR=\$(mktemp "\${TMPDIR:-/tmp}/alcurator-err.XXXXXX")
+    if "\$OC" run --format json --agent autolearn-reviewer "\$CPROMPT" > "\$COUT" 2> "\$CERR"; then
+      CEXIT=0
+    else
+      CEXIT=\$?
     fi
+    if [ -s "\$CERR" ]; then
+      printf '[%s] curator stderr\n' "\$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "\$ERROR_LOG"
+      cat "\$CERR" >> "\$ERROR_LOG"
+    fi
+    CSID=\$(sed -n 's/.*"sessionID"[[:space:]]*:[[:space:]]*"\\([^"]*\\)".*/\\1/p' "\$COUT" | head -1)
+    if [ "\$CEXIT" -ne 0 ] || [ -z "\$CSID" ]; then
+      if [ -s "\$COUT" ]; then
+        printf '[%s] curator stdout\n' "\$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "\$ERROR_LOG"
+        cat "\$COUT" >> "\$ERROR_LOG"
+      fi
+      rm -f "\$COUT" "\$CERR"
+      [ "\$CEXIT" -ne 0 ] || CEXIT=1
+      log_failure "\$CEXIT" "curator"
+      exit "\$CEXIT"
+    fi
+    rm -f "\$COUT" "\$CERR"
+    case "\$(basename "\$OC")" in
+      opencode2) "\$OC" api delete "/api/session/\$CSID" >/dev/null 2>&1 ;;
+      *)         "\$OC" session delete "\$CSID" >/dev/null 2>&1 ;;
+    esac
   fi
   # Same aftercare as the review path: push post-curator state when sync is
   # configured; stay silent otherwise.
@@ -362,7 +391,16 @@ if [ "\$(basename "\$OC")" = "pi" ]; then
   exit 0
 fi
 OUT=\$(mktemp "\${TMPDIR:-/tmp}/alreview.XXXXXX")
-"\$OC" run --format json "\$@" < "\$REVIEW_FILE" > "\$OUT" 2>/dev/null
+ERR=\$(mktemp "\${TMPDIR:-/tmp}/alreview-err.XXXXXX")
+if "\$OC" run --format json "\$@" < "\$REVIEW_FILE" > "\$OUT" 2> "\$ERR"; then
+  REVIEW_EXIT=0
+else
+  REVIEW_EXIT=\$?
+fi
+if [ -s "\$ERR" ]; then
+  printf '[%s] review stderr\n' "\$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "\$ERROR_LOG"
+  cat "\$ERR" >> "\$ERROR_LOG"
+fi
 # BRE backslashes below are DOUBLED (\\\\, \\1) because this script lives
 # inside a JS template literal — single backslashes get eaten by the escape
 # evaluation (\\( -> ( , \\1 -> 0x01 control char under Bun) and the sed
@@ -371,7 +409,17 @@ OUT=\$(mktemp "\${TMPDIR:-/tmp}/alreview.XXXXXX")
 # both binaries emit "run --format json" as JSONL with a top-level
 # "sessionID" on every line, so line-by-line sed extraction is safe.
 SID=\$(sed -n 's/.*"sessionID"[[:space:]]*:[[:space:]]*"\\([^"]*\\)".*/\\1/p' "\$OUT" | head -1)
-rm -f "\$OUT"
+if [ "\$REVIEW_EXIT" -ne 0 ] || [ -z "\$SID" ]; then
+  if [ -s "\$OUT" ]; then
+    printf '[%s] review stdout\n' "\$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "\$ERROR_LOG"
+    cat "\$OUT" >> "\$ERROR_LOG"
+  fi
+  rm -f "\$OUT" "\$ERR"
+  [ "\$REVIEW_EXIT" -ne 0 ] || REVIEW_EXIT=1
+  log_failure "\$REVIEW_EXIT" "review"
+  exit "\$REVIEW_EXIT"
+fi
+rm -f "\$OUT" "\$ERR"
 if [ -n "\$SID" ]; then
   case "\$(basename "\$OC")" in
     opencode2) "\$OC" api delete "/api/session/\$SID" >/dev/null 2>&1 ;;

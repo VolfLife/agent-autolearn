@@ -67,9 +67,35 @@ echo "[3/5] Configuring opencode.json..."
 mkdir -p "$(dirname "$OPENCODE_JSON")"
 
 python3 -c "
-import json, os, sys
+import json, os, sys, re, shutil, subprocess
 
 path = '$OPENCODE_JSON'
+
+# OpenCode v2 validates plugin entries against its object-based API. Do not
+# register the legacy v1 function plugin there: it only creates a startup
+# warning and is not used by the v2 shell.
+opencode_major = None
+for executable in ('opencode2', 'opencode'):
+    resolved = shutil.which(executable)
+    if not resolved:
+        continue
+    try:
+        proc = subprocess.run([resolved, '--version'], capture_output=True,
+                              text=True, timeout=5)
+        match = re.search(r'\b(\d+)\.', (proc.stdout or '') + ' ' + (proc.stderr or ''))
+        if match:
+            opencode_major = int(match.group(1))
+            break
+    except (OSError, subprocess.SubprocessError):
+        pass
+is_opencode_v2 = (
+    (opencode_major is not None and opencode_major >= 2)
+    or shutil.which('opencode2') is not None
+)
+if is_opencode_v2:
+    legacy_plugin_file = os.path.join(os.path.dirname(path), 'plugins', 'autolearn.js')
+    if os.path.exists(legacy_plugin_file):
+        os.remove(legacy_plugin_file)
 
 if os.path.exists(path):
     with open(path) as f:
@@ -79,18 +105,24 @@ else:
 
 changed = False
 
-# plugin — v1 shell (read by OpenCode v1 via the 'plugin' key; OpenCode v2
-# normalizes the same key, where the v1 function export is expected to fail
-# schema validation with a warning — harmless, the v2 entry below is what
-# v2 actually loads).
-if 'plugin' not in data:
-    data['plugin'] = []
-plugins = data['plugin'] if isinstance(data['plugin'], list) else [data['plugin']]
+# plugin — v1 shell. Keep it only on OpenCode v1; v2 uses the object-based
+# plugin API and must not try to load this legacy function export.
 plugin_entry = './plugins/autolearn.js'
-if plugin_entry not in plugins:
-    plugins.append(plugin_entry)
-    data['plugin'] = plugins
-    changed = True
+legacy_plugins = data.get('plugin', [])
+legacy_plugins = legacy_plugins if isinstance(legacy_plugins, list) else [legacy_plugins]
+if is_opencode_v2:
+    filtered = [p for p in legacy_plugins if p != plugin_entry]
+    if filtered != legacy_plugins:
+        if filtered:
+            data['plugin'] = filtered
+        else:
+            data.pop('plugin', None)
+        changed = True
+else:
+    if plugin_entry not in legacy_plugins:
+        legacy_plugins.append(plugin_entry)
+        data['plugin'] = legacy_plugins
+        changed = True
 
 # plugins — v2 shell (native v2 key; OpenCode v1 ignores unknown top-level
 # keys, so both versions can share this file).
@@ -159,6 +191,33 @@ elif data['agent']['autolearn-reviewer'].get('prompt') != reviewer_prompt:
     data['agent']['autolearn-reviewer']['prompt'] = reviewer_prompt
     changed = True
 
+if is_opencode_v2:
+    # OpenCode v2 uses the plural `agents` key and requires a runnable
+    # agent mode. Keep the legacy singular `agent` entry above for v1.
+    if 'agents' not in data or not isinstance(data['agents'], dict):
+        data['agents'] = {}
+    reviewer_v2_prompt = (
+        'You are the autolearn reviewer. Read '
+        + os.path.expanduser('~/.agents/skills/autolearn/SKILL.md')
+        + ' first, then read '
+        + os.path.expanduser('~/.agents/skills/autolearn/references/reviewer.md')
+        + ' and follow its Action Protocol exactly. The conversation slice to '
+        'review is the current prompt. Take action only in the autolearn store; '
+        'never modify project source code.'
+    )
+    reviewer_v2 = data['agents'].setdefault('autolearn-reviewer', {})
+    if not isinstance(reviewer_v2, dict):
+        reviewer_v2 = {}
+        data['agents']['autolearn-reviewer'] = reviewer_v2
+    for key, value in {
+        'description': 'Autolearn reviewer: extracts durable lessons from conversation slices',
+        'mode': 'all',
+        'prompt': reviewer_v2_prompt,
+    }.items():
+        if reviewer_v2.get(key) != value:
+            reviewer_v2[key] = value
+            changed = True
+    
 with open(path, 'w') as f:
     json.dump(data, f, indent=2)
     f.write('\n')
@@ -186,7 +245,14 @@ fi
 # 5. Verify
 echo "[5/5] Verifying..."
 OK=true
-[[ -f "$PLUGIN_DIR/autolearn.js" ]] || { echo "  MISSING: $PLUGIN_DIR/autolearn.js"; OK=false; }
+if [[ -f "$PLUGIN_DIR/autolearn.js" ]]; then
+  :
+elif grep -q 'autolearn-v2.js' "$OPENCODE_JSON" 2>/dev/null; then
+  echo "  Legacy v1 shell intentionally omitted for OpenCode v2."
+else
+  echo "  MISSING: $PLUGIN_DIR/autolearn.js"
+  OK=false
+fi
 [[ -f "$PLUGIN_DIR/autolearn-v2.js" ]] || { echo "  MISSING: $PLUGIN_DIR/autolearn-v2.js"; OK=false; }
 [[ -f "$PLUGIN_DIR/autolearn-core.mjs" ]] || { echo "  MISSING: $PLUGIN_DIR/autolearn-core.mjs"; OK=false; }
 [[ -f "$PI_EXT_DIR/autolearn-pi.ts" ]] || { echo "  MISSING: $PI_EXT_DIR/autolearn-pi.ts"; OK=false; }

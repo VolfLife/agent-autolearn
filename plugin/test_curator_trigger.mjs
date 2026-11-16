@@ -147,7 +147,7 @@ ok(existsSync(WRAPPER_SCRIPT), "ensureStore installed the wrapper")
 const FAKE_LOG = join(HOME, "fake-oc.log")
 const fakeOc = join(HOME, "fake-oc")
 writeFileSync(fakeOc, `#!/bin/sh
-printf '%s\\n' "$*" >> "$FAKE_OC_LOG"
+printf '%s\n' "$*" >> "$FAKE_OC_LOG"
 if [ "$1" = "run" ]; then
   # The wrapper streams the review file on stdin (argv stays small, issue
   # #21); log it so content flow is observable.
@@ -264,6 +264,41 @@ while (Date.now() < deadline && !fakeLines().slice(reviewBeforeF).some((l) => l.
 ok(fakeLines().slice(reviewBeforeF).some((l) => l.includes(bigMarker)), "40 KB review content flowed to the harness on stdin")
 
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+console.log("G. Failed reviewer runs are visible and return a failure status")
+
+const failingOc = join(HOME, "fake-oc-failing")
+writeFileSync(failingOc, `#!/bin/sh
+if [ "$1" = "run" ]; then
+  echo '{"type":"error","error":{"message":"Agent not found: autolearn-reviewer"}}'
+fi
+exit 7
+`)
+chmodSync(failingOc, 0o755)
+const failedRun = spawnWrapper(["--curator"], {
+  ...env,
+  AUTOLEARN_HARNESS_BIN: failingOc,
+  encoding: "utf-8",
+  timeout: 15000,
+})
+ok(failedRun.status === 7, "failed reviewer subprocess exit code is propagated")
+// A missing min_interval_ms must retain the documented 3-minute default.
+writeFileSync(cfg, "review_threshold: 10\n")
+writeFileSync(join(HOME, ".last_wrapper_review"), `${Math.floor(Date.now() / 1000)}:\n`)
+const defaultIntervalReview = join(HOME, "default-interval-review.md")
+writeFileSync(defaultIntervalReview, "# Autolearn Review\n\n## Conversation\n\nDEFAULT-INTERVAL-MARKER\n")
+const beforeDefaultInterval = fakeLines().length
+const defaultIntervalRun = spawnWrapper([defaultIntervalReview, "--agent", "autolearn-reviewer"], {
+  ...env, encoding: "utf-8", timeout: 15000,
+})
+ok(defaultIntervalRun.status === 0, "missing min_interval_ms does not break wrapper arithmetic")
+ok(fakeLines().length === beforeDefaultInterval, "default 3-minute interval still suppresses an immediate review")
+
+const errorLog = readFileSync(join(HOME, "review-errors.log"), "utf-8")
+ok(errorLog.includes("Agent not found: autolearn-reviewer"), "reviewer stdout is preserved in review-errors.log")
+const failedObs = readFileSync(OBS_FILE, "utf-8")
+ok(failedObs.includes('"type":"review_failed"') && failedObs.includes('"trigger":"curator"'), "review_failed observation is appended")
 
 console.log(`\n${passed} passed, ${failed} failed`)
 rmSync(HOME, { recursive: true, force: true })

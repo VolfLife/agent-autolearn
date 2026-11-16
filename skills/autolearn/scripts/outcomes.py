@@ -133,6 +133,105 @@ def classify_gt(tool: str, status: str, input_json: dict, output_peek: str,
     return 1 if output_peek else 0
 
 
+def _table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
+    try:
+        return {str(r[1]) for r in conn.execute(f"PRAGMA table_info({table})")}
+    except sqlite3.Error:
+        return set()
+
+
+def _source_kind(conn: sqlite3.Connection) -> str | None:
+    """Detect supported OpenCode storage without assuming a particular release."""
+    tables = {
+        str(r[0]) for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        )
+    }
+    if {"id", "session_id", "message_id", "time_created", "data"} <= _table_columns(conn, "part") and "part" in tables:
+        return "v1"
+    if {"id", "session_id", "time_created", "data"} <= _table_columns(conn, "session_message") and "session_message" in tables:
+        return "v2"
+    return None
+
+
+def _iter_source_events(conn: sqlite3.Connection, last_time: int, last_id: str):
+    """Yield normalized tool/step events from OpenCode v1 parts or v2 message JSON.
+
+    V2 stores an array of content parts inside session_message.data. The
+    message id is the incremental cursor (all content entries are processed
+    together), while a synthetic message-id/index identifies each indexed
+    event in outcomes.db.
+    """
+    kind = _source_kind(conn)
+    if kind == "v1":
+        rows = conn.execute(
+            "SELECT p.id AS part_id, p.id AS cursor_id, p.session_id, "
+            "p.message_id, p.time_created, p.data AS data "
+            "FROM part p "
+            "WHERE p.time_created > ? OR (p.time_created = ? AND p.id > ?) "
+            "ORDER BY p.time_created ASC, p.id ASC",
+            [last_time, last_time, last_id],
+        )
+        for row in rows:
+            yield dict(row)
+        return
+
+    if kind == "v2":
+        rows = conn.execute(
+            "SELECT sm.id AS message_id, sm.session_id, sm.time_created, "
+            "sm.data AS message_data "
+            "FROM session_message sm "
+            "WHERE sm.time_created > ? OR (sm.time_created = ? AND sm.id > ?) "
+            "ORDER BY sm.time_created ASC, sm.id ASC",
+            [last_time, last_time, last_id],
+        )
+        for row in rows:
+            message_id = str(row["message_id"])
+            payload = _json(row["message_data"])
+            content = payload.get("content")
+            emitted = False
+            if isinstance(content, list):
+                for index, item in enumerate(content):
+                    if not isinstance(item, dict):
+                        continue
+                    ptype = item.get("type")
+                    if ptype == "tool":
+                        normalized = {
+                            "type": "tool",
+                            "tool": item.get("name") or "unknown",
+                            "state": item.get("state") or {},
+                        }
+                    elif ptype in ("step-finish", "step_finish"):
+                        normalized = item
+                    else:
+                        continue
+                    emitted = True
+                    yield {
+                        "part_id": f"{message_id}:{index:06d}",
+                        "_cursor_id": message_id,
+                        "session_id": row["session_id"],
+                        "message_id": message_id,
+                        "time_created": row["time_created"],
+                        "data": json.dumps(normalized, ensure_ascii=False),
+                    }
+            # Advance the high-water mark even for messages without tool events.
+            if not emitted:
+                yield {
+                    "part_id": f"{message_id}:skip",
+                    "_cursor_id": message_id,
+                    "session_id": row["session_id"],
+                    "message_id": message_id,
+                    "time_created": row["time_created"],
+                    "data": "{}",
+                }
+        return
+
+    raise sqlite3.OperationalError(
+        "Unsupported OpenCode database schema: expected legacy part table "
+        "or v2 session_message table with id/session_id/time_created/data"
+    )
+
+
 class OutcomeIndex:
     """A queryable index over opencode.db tool-call + step-cost parts.
 
@@ -229,12 +328,21 @@ class OutcomeIndex:
         cfg = {**DEFAULT_CONFIG, **(config or {})}
         self.init_schema()
 
-        # Hoist the source-DB check ABOVE any --full truncation so a missing/
-        # moved opencode.db can never wipe an existing index (data-loss guard).
+        # Validate the source DB and schema BEFORE any --full truncation.
+        # A missing or newer unsupported schema must never wipe an existing index.
         db = self._opencode_conn()
         if db is None:
             return {"tool_parts": 0, "step_parts": 0, "skill_loads": 0,
                     "gt_ge2": 0, "skipped": 0, "errors": 0, "no_opencode_db": True}
+        source_kind = _source_kind(db)
+        if source_kind is None:
+            db.close()
+            return {
+                "tool_parts": 0, "step_parts": 0, "skill_loads": 0,
+                "gt_ge2": 0, "skipped": 0, "errors": 1,
+                "unsupported_schema": True,
+                "error": "Unsupported OpenCode database schema: expected part or session_message tables",
+            }
 
         if full:
             self.conn.execute("DELETE FROM tool_outcome")
@@ -248,14 +356,7 @@ class OutcomeIndex:
                    "gt_ge2": 0, "skipped": 0, "errors": 0}
         high_time, high_id = last_time, last_id
 
-        rows = db.execute(
-            "SELECT p.id AS part_id, p.session_id, p.message_id, "
-            "p.time_created, p.data AS data "
-            "FROM part p "
-            "WHERE p.time_created > ? OR (p.time_created = ? AND p.id > ?) "
-            "ORDER BY p.time_created ASC, p.id ASC",
-            [last_time, last_time, last_id],
-        )
+        rows = _iter_source_events(db, last_time, last_id)
 
         tool_rows: list[tuple] = []
         step_rows: list[tuple] = []
@@ -265,8 +366,9 @@ class OutcomeIndex:
             ptype = data.get("type")
             ts = int(r["time_created"])
             pid = r["part_id"]
-            # cursor is ordered (time, id) ASC, so each row advances the mark
-            high_time, high_id = ts, pid
+            # Cursor is the source part id (v1) or message id (v2). All
+            # content entries in a v2 message are consumed before advancing.
+            high_time, high_id = ts, r.get("_cursor_id", pid)
             session_id = r["session_id"]
             message_id = r["message_id"]
             if ptype == "step-finish":
@@ -290,7 +392,7 @@ class OutcomeIndex:
                 out = state.get("output")
                 peek = _peek(out if isinstance(out, str) else json.dumps(out, ensure_ascii=False))
                 tool = data.get("tool") or "unknown"
-                skill_name = inp.get("name") if tool == "skill" else None
+                skill_name = (inp.get("name") or inp.get("id")) if tool == "skill" else None
                 gt = classify_gt(tool, status, inp, peek, meta_exit=meta_exit)
                 tool_rows.append((
                     pid, session_id, message_id, ts, ts, tool, status,
@@ -458,6 +560,10 @@ def cmd_outcomes_init(args):
     summary = idx.index(full=bool(getattr(args, "full", False)))
     if summary.get("no_opencode_db"):
         print(f"OpenCode database not found at {_opencode_db_path()}")
+        idx.close()
+        raise SystemExit(1)
+    if summary.get("unsupported_schema"):
+        print(summary.get("error", "Unsupported OpenCode database schema"))
         idx.close()
         raise SystemExit(1)
     print(f"Indexed {summary['tool_parts']} tool parts, "

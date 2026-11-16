@@ -505,14 +505,53 @@ def promote_proposals() -> dict:
 
 # @spec LH-PRUNE-001 — never-used pruner (use_count × age)
 def prune_unused_skills(config: dict) -> dict:
-    """Auto-archive autolearn-created skills with use_count==0 past the grace period.
+    """Auto-archive never-used autolearn skills only when usage evidence is valid.
 
-    Uses the repaired use_count (derived from outcomes index skill-load counts).
-    Pinned skills and non-autolearn skills are exempt.
+    Never interpret a missing, empty, or unsupported outcomes index as proof
+    that a skill was unused. Re-index the source DB first and derive counts
+    directly from its complete indexed signal set.
     """
     grace = int(config.get("unused_grace_days", 60))
     today = date.today()
     usage = load_usage()
+
+    idx = outcomes.OutcomeIndex(OUTCOMES_DB, OPENCODE_DB)
+    try:
+        indexed = idx.index()
+        if (indexed.get("no_opencode_db") or indexed.get("unsupported_schema")
+                or indexed.get("errors")):
+            return {
+                "archived": [], "grace_days": grace,
+                "skipped": indexed.get("error", "outcomes index is unavailable"),
+            }
+        signals = idx.skill_use_signals()
+    except Exception as exc:
+        return {"archived": [], "grace_days": grace,
+                "skipped": f"could not verify skill usage: {exc}"}
+    finally:
+        idx.close()
+
+    # Refresh autolearn-owned counts from the validated source of truth. A
+    # missing signal means zero only after a successful full-source scan.
+    usage_changed = False
+    for name, meta in usage.items():
+        if meta.get("created_by") != "autolearn":
+            continue
+        signal = signals.get(name)
+        actual_count = int(signal["count"]) if signal else 0
+        if int(meta.get("use_count") or 0) != actual_count:
+            meta["use_count"] = actual_count
+            usage_changed = True
+        if signal and signal.get("last_seen_ms"):
+            last_seen = datetime.fromtimestamp(
+                signal["last_seen_ms"] / 1000
+            ).strftime("%Y-%m-%d")
+            if meta.get("last_activity_at", "") < last_seen:
+                meta["last_activity_at"] = last_seen
+                usage_changed = True
+    if usage_changed:
+        save_usage(usage)
+
     archived = []
     for name, meta in list(usage.items()):
         if meta.get("state") == "archived" or meta.get("pinned"):
@@ -543,7 +582,7 @@ def prune_unused_skills(config: dict) -> dict:
         archived.append(name)
     if archived:
         save_usage(usage)
-    return {"archived": archived, "grace_days": grace}
+    return {"archived": archived, "grace_days": grace, "usage_verified": True}
 
 
 # @spec WIKI-CUR-001 — wiki consolidation (curator pass)
@@ -725,9 +764,13 @@ def refresh_context():
 def cmd_memory_add(args):
     ensure_dirs()
     reg = memory_registry()
+    existing = reg.find_by_text(args.content)
     rec = reg.add(args.content, "memory")
     refresh_context()
-    print(f"Memory updated: {rec['text'][:80]}")
+    if existing is not None:
+        print(f"Memory already present; reinforcement refreshed: {rec['text'][:80]}")
+    else:
+        print(f"Memory added: {rec['text'][:80]}")
 
 
 def cmd_memory_remove(args):
@@ -1247,7 +1290,9 @@ def cmd_curator_run(args):
         print(f"  procedures: {cp_fail.get('pass', 0)} pass, "
               f"{cp_fail.get('fail', 0)} fail, {cp_fail.get('inconclusive', 0)} inconclusive"
               + (f", {cp_fail['demoted']} demoted" if cp_fail.get('demoted') else ""))
-    if isinstance(cp_indexed, dict) and cp_indexed.get("gt_ge2") is not None:
+    if isinstance(cp_indexed, dict) and cp_indexed.get("error"):
+        print(f"  outcomes: indexing unavailable — {cp_indexed['error']}")
+    elif isinstance(cp_indexed, dict) and cp_indexed.get("gt_ge2") is not None:
         print(f"  outcomes: indexed {cp_indexed.get('tool_parts', 0)} tool parts "
               f"({cp_indexed.get('gt_ge2', 0)} ground-truth)")
     if isinstance(cp.get("usage_repaired"), dict):
@@ -1337,11 +1382,44 @@ def iso_from_unix_ms(unix_ms: int) -> str:
     return dt.strftime("%Y-%m-%d %H:%M")
 
 
+def _opencode_table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
+    try:
+        return {str(row[1]) for row in conn.execute(f"PRAGMA table_info({table})")}
+    except sqlite3.Error:
+        return {}
+
+
+def _opencode_has_table(conn: sqlite3.Connection, table: str) -> bool:
+    return bool(conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", [table]
+    ).fetchone())
+
+
 def cmd_search_init(args):
     full = getattr(args, "full", False)
     db_conn = get_opencode_conn()
     if not db_conn:
         print(f"OpenCode database not found at {OPENCODE_DB}")
+        sys.exit(1)
+
+    # Detect supported storage before clearing anything. OpenCode v1 stores
+    # text in part/message; v2 stores message content arrays in session_message.
+    has_v1_source = (
+        {"id", "message_id", "session_id", "time_created", "data"}
+        <= _opencode_table_columns(db_conn, "part")
+        and _opencode_has_table(db_conn, "message")
+    )
+    has_v2_source = (
+        {"id", "session_id", "time_created", "data"}
+        <= _opencode_table_columns(db_conn, "session_message")
+        and _opencode_has_table(db_conn, "session_v2")
+    )
+    if not (has_v1_source or has_v2_source):
+        db_conn.close()
+        print(
+            "Unsupported OpenCode database schema: expected legacy part/message "
+            "tables or v2 session_message/session_v2 tables."
+        )
         sys.exit(1)
 
     sconn = get_search_conn()
@@ -1363,53 +1441,101 @@ def cmd_search_init(args):
     last_v2_mark_row = sconn.execute(
         "SELECT value FROM index_state WHERE key = 'last_v2_message_time'"
     ).fetchone()
-    last_v2_mark = int(last_v2_mark_row["value"]) if last_v2_mark_row else 0
+    last_v2_time, last_v2_id = 0, ""
+    if last_v2_mark_row:
+        raw_mark = str(last_v2_mark_row["value"])
+        mark_time, separator, mark_id = raw_mark.partition("|")
+        try:
+            last_v2_time = int(mark_time)
+            last_v2_id = mark_id if separator else ""
+        except ValueError:
+            last_v2_time, last_v2_id = 0, ""
 
     session_cache: dict[str, dict] = {}
 
     def get_session(session_id: str) -> dict:
         if session_id in session_cache:
             return session_cache[session_id]
-        row = None
-        # v2 first: for ids present in both stores, session_v2 carries the
-        # fresher title. The v2 table may be absent on v1-only installs.
-        try:
-            row = db_conn.execute(
-                "SELECT id, title, project_id, time_created FROM session_v2 WHERE id = ?",
-                [session_id],
-            ).fetchone()
-        except sqlite3.OperationalError:
-            row = None
-        if row is None:
-            row = db_conn.execute(
-                "SELECT id, title, project_id, time_created FROM session WHERE id = ?",
-                [session_id],
-            ).fetchone()
-        if row:
-            project_row = db_conn.execute(
-                "SELECT name FROM project WHERE id = ?", [row["project_id"]]
-            ).fetchone()
-            info = {
-                "title": row["title"] or "Untitled",
-                "project": (project_row["name"] or "") if project_row else "",
-                "time_created": row["time_created"],
-            }
-        else:
-            info = {"title": "Untitled", "project": "", "time_created": 0}
+
+        info = {"title": "Untitled", "project": "", "time_created": 0}
+        # V2 builds may store the working directory directly instead of the
+        # v1 project_id foreign key. Inspect columns rather than assuming one
+        # exact beta schema.
+        if _opencode_has_table(db_conn, "session_v2"):
+            cols = _opencode_table_columns(db_conn, "session_v2")
+            selected = ["id", "time_created"]
+            if "title" in cols:
+                selected.append("title")
+            if "directory" in cols:
+                selected.append("directory")
+            if "project_id" in cols:
+                selected.append("project_id")
+            if {"id", "time_created"} <= cols:
+                row = db_conn.execute(
+                    f"SELECT {', '.join(selected)} FROM session_v2 WHERE id = ?",
+                    [session_id],
+                ).fetchone()
+                if row:
+                    project = row["directory"] if "directory" in row.keys() else ""
+                    if not isinstance(project, str):
+                        project = ""
+                    if not project and "project_id" in row.keys() and _opencode_has_table(db_conn, "project"):
+                        project_row = db_conn.execute(
+                            "SELECT name FROM project WHERE id = ?", [row["project_id"]]
+                        ).fetchone()
+                        project = (project_row["name"] or "") if project_row else ""
+                    if project and ("/" in project or chr(92) in project):
+                        project = project.replace(chr(92), "/").rstrip("/").split("/")[-1]
+                    info = {
+                        "title": (row["title"] or "Untitled") if "title" in row.keys() else "Untitled",
+                        "project": project or "",
+                        "time_created": row["time_created"] or 0,
+                    }
+
+        # Legacy v1 fallback for installs where session_v2 is absent or has
+        # no matching id.
+        if info["time_created"] == 0 and _opencode_has_table(db_conn, "session"):
+            cols = _opencode_table_columns(db_conn, "session")
+            if {"id", "time_created"} <= cols:
+                selected = ["id", "time_created"]
+                if "title" in cols:
+                    selected.append("title")
+                if "project_id" in cols:
+                    selected.append("project_id")
+                row = db_conn.execute(
+                    f"SELECT {', '.join(selected)} FROM session WHERE id = ?",
+                    [session_id],
+                ).fetchone()
+                if row:
+                    project = ""
+                    if "project_id" in row.keys() and _opencode_has_table(db_conn, "project"):
+                        project_row = db_conn.execute(
+                            "SELECT name FROM project WHERE id = ?", [row["project_id"]]
+                        ).fetchone()
+                        project = (project_row["name"] or "") if project_row else ""
+                    info = {
+                        "title": (row["title"] or "Untitled") if "title" in row.keys() else "Untitled",
+                        "project": project,
+                        "time_created": row["time_created"] or 0,
+                    }
+
         session_cache[session_id] = info
         return info
 
-    rows = db_conn.execute(
-        """
-        SELECT p.id AS part_id, p.message_id, p.session_id,
-               p.time_created, p.data AS part_data, m.data AS msg_data
-        FROM part p
-        JOIN message m ON m.id = p.message_id
-        WHERE p.time_created > ?
-        ORDER BY p.time_created ASC
-        """,
-        [last_mark],
-    )
+    if has_v1_source:
+        rows = db_conn.execute(
+            """
+            SELECT p.id AS part_id, p.message_id, p.session_id,
+                   p.time_created, p.data AS part_data, m.data AS msg_data
+            FROM part p
+            JOIN message m ON m.id = p.message_id
+            WHERE p.time_created > ?
+            ORDER BY p.time_created ASC, p.id ASC
+            """,
+            [last_mark],
+        )
+    else:
+        rows = []
 
     count = 0
     max_time = last_mark
@@ -1459,32 +1585,32 @@ def cmd_search_init(args):
     # Messages mirrored into the v1 `message` table are already indexed by
     # the v1 loop above — skip them here to avoid double-indexing.
     v2_count = 0
-    v2_max_time = last_v2_mark
-    has_v1_message_table = False
-    try:
-        has_v1_message_table = bool(
-            db_conn.execute(
-                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'message'"
-            ).fetchone()
-        )
-    except sqlite3.OperationalError:
-        pass
+    v2_max_time = last_v2_time
+    has_v1_message_table = has_v1_source
 
     v2_sql = """
         SELECT sm.id AS msg_id, sm.session_id, sm.type AS role,
                sm.time_created, sm.data AS msg_data
         FROM session_message sm
-        WHERE sm.time_created > ?
+        WHERE (sm.time_created > ? OR (sm.time_created = ? AND sm.id > ?))
+        ORDER BY sm.time_created ASC, sm.id ASC
     """
-    if has_v1_message_table:
-        v2_sql += "  AND NOT EXISTS (SELECT 1 FROM message m WHERE m.id = sm.id)\n"
-    v2_sql += "        ORDER BY sm.time_created ASC"
     try:
-        v2_cursor = db_conn.execute(v2_sql, [last_v2_mark])
+        v2_cursor = db_conn.execute(v2_sql, [last_v2_time, last_v2_time, last_v2_id])
     except sqlite3.OperationalError:
         v2_cursor = None
 
+    v2_high_time, v2_high_id = last_v2_time, last_v2_id
     for row in (v2_cursor or []):
+        v2_high_time = int(row["time_created"] or 0)
+        v2_high_id = str(row["msg_id"])
+        v2_max_time = v2_high_time
+        # In hybrid databases, v1 text rows were already indexed above.
+        # Still advance the v2 cursor past mirrored rows to avoid rescanning.
+        if has_v1_message_table and db_conn.execute(
+            "SELECT 1 FROM message WHERE id = ?", [row["msg_id"]]
+        ).fetchone():
+            continue
         if row["role"] not in ("user", "assistant"):
             continue
         try:
@@ -1517,13 +1643,12 @@ def cmd_search_init(args):
             )
             v2_count += 1
 
-        if row["time_created"] > v2_max_time:
-            v2_max_time = row["time_created"]
-
-    if v2_max_time > last_v2_mark:
+    if v2_high_time > last_v2_time or (
+        v2_high_time == last_v2_time and v2_high_id > last_v2_id
+    ):
         sconn.execute(
             "INSERT OR REPLACE INTO index_state (key, value) VALUES ('last_v2_message_time', ?)",
-            [str(v2_max_time)],
+            [f"{v2_high_time}|{v2_high_id}"],
         )
 
     sconn.execute("INSERT INTO session_text(session_text) VALUES ('rebuild')")
@@ -1702,7 +1827,10 @@ def cmd_search_status(args):
     last_v2_row = sconn.execute(
         "SELECT value FROM index_state WHERE key = 'last_v2_message_time'"
     ).fetchone()
-    last_v2_mark = int(last_v2_row["value"]) if last_v2_row else 0
+    try:
+        last_v2_mark = int(str(last_v2_row["value"]).partition("|")[0]) if last_v2_row else 0
+    except ValueError:
+        last_v2_mark = 0
     db_size = SEARCH_DB.stat().st_size if SEARCH_DB.exists() else 0
 
     print("Index status:")
