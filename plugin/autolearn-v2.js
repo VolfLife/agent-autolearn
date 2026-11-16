@@ -287,6 +287,22 @@ export default {
       }
     }
 
+    // OpenCode v2 does not expose the v1 beforeExit hook. Flush the
+    // most substantial buffered conversation when the host process is
+    // shutting down, matching the documented session-exit review behavior.
+    function onBeforeExit() {
+      const candidate = [...sessions.values()]
+        .filter(st => !st.isReviewer && st.buffer.length > 0)
+        .sort((a, b) => b.buffer.length - a.buffer.length)[0]
+      if (!candidate || reviewInProgress) return
+      core.dbg("EXIT REVIEW (v2)", candidate.buffer.length, "messages")
+      spawnReview(candidate, "exit").catch(err => {
+        core.dbg("EXIT REVIEW FAILED (v2)", err.message)
+        reviewInProgress = false
+      })
+    }
+    process.on("beforeExit", onBeforeExit)
+
     const controller = new AbortController()
     void (async () => {
       try {
@@ -305,6 +321,7 @@ export default {
 
     return () => {
       controller.abort()
+      process.off("beforeExit", onBeforeExit)
       core.dbg("PLUGIN UNLOADED (v2)")
     }
   },
