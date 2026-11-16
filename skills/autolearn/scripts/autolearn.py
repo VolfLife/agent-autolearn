@@ -505,14 +505,53 @@ def promote_proposals() -> dict:
 
 # @spec LH-PRUNE-001 — never-used pruner (use_count × age)
 def prune_unused_skills(config: dict) -> dict:
-    """Auto-archive autolearn-created skills with use_count==0 past the grace period.
+    """Auto-archive never-used autolearn skills only when usage evidence is valid.
 
-    Uses the repaired use_count (derived from outcomes index skill-load counts).
-    Pinned skills and non-autolearn skills are exempt.
+    Never interpret a missing, empty, or unsupported outcomes index as proof
+    that a skill was unused. Re-index the source DB first and derive counts
+    directly from its complete indexed signal set.
     """
     grace = int(config.get("unused_grace_days", 60))
     today = date.today()
     usage = load_usage()
+
+    idx = outcomes.OutcomeIndex(OUTCOMES_DB, OPENCODE_DB)
+    try:
+        indexed = idx.index()
+        if (indexed.get("no_opencode_db") or indexed.get("unsupported_schema")
+                or indexed.get("errors")):
+            return {
+                "archived": [], "grace_days": grace,
+                "skipped": indexed.get("error", "outcomes index is unavailable"),
+            }
+        signals = idx.skill_use_signals()
+    except Exception as exc:
+        return {"archived": [], "grace_days": grace,
+                "skipped": f"could not verify skill usage: {exc}"}
+    finally:
+        idx.close()
+
+    # Refresh autolearn-owned counts from the validated source of truth. A
+    # missing signal means zero only after a successful full-source scan.
+    usage_changed = False
+    for name, meta in usage.items():
+        if meta.get("created_by") != "autolearn":
+            continue
+        signal = signals.get(name)
+        actual_count = int(signal["count"]) if signal else 0
+        if int(meta.get("use_count") or 0) != actual_count:
+            meta["use_count"] = actual_count
+            usage_changed = True
+        if signal and signal.get("last_seen_ms"):
+            last_seen = datetime.fromtimestamp(
+                signal["last_seen_ms"] / 1000
+            ).strftime("%Y-%m-%d")
+            if meta.get("last_activity_at", "") < last_seen:
+                meta["last_activity_at"] = last_seen
+                usage_changed = True
+    if usage_changed:
+        save_usage(usage)
+
     archived = []
     for name, meta in list(usage.items()):
         if meta.get("state") == "archived" or meta.get("pinned"):
@@ -543,7 +582,7 @@ def prune_unused_skills(config: dict) -> dict:
         archived.append(name)
     if archived:
         save_usage(usage)
-    return {"archived": archived, "grace_days": grace}
+    return {"archived": archived, "grace_days": grace, "usage_verified": True}
 
 
 # @spec WIKI-CUR-001 — wiki consolidation (curator pass)
