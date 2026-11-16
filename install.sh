@@ -241,7 +241,14 @@ fi
 # 5. Verify
 echo "[5/5] Verifying..."
 OK=true
-[[ -f "$PLUGIN_DIR/autolearn.js" ]] || { echo "  MISSING: $PLUGIN_DIR/autolearn.js"; OK=false; }
+if [[ -f "$PLUGIN_DIR/autolearn.js" ]]; then
+  :
+elif grep -q 'autolearn-v2.js' "$OPENCODE_JSON" 2>/dev/null; then
+  echo "  Legacy v1 shell intentionally omitted for OpenCode v2."
+else
+  echo "  MISSING: $PLUGIN_DIR/autolearn.js"
+  OK=false
+fi
 [[ -f "$PLUGIN_DIR/autolearn-v2.js" ]] || { echo "  MISSING: $PLUGIN_DIR/autolearn-v2.js"; OK=false; }
 [[ -f "$PLUGIN_DIR/autolearn-core.mjs" ]] || { echo "  MISSING: $PLUGIN_DIR/autolearn-core.mjs"; OK=false; }
 [[ -f "$PI_EXT_DIR/autolearn-pi.ts" ]] || { echo "  MISSING: $PI_EXT_DIR/autolearn-pi.ts"; OK=false; }
