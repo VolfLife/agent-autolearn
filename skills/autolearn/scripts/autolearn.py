@@ -1290,7 +1290,9 @@ def cmd_curator_run(args):
         print(f"  procedures: {cp_fail.get('pass', 0)} pass, "
               f"{cp_fail.get('fail', 0)} fail, {cp_fail.get('inconclusive', 0)} inconclusive"
               + (f", {cp_fail['demoted']} demoted" if cp_fail.get('demoted') else ""))
-    if isinstance(cp_indexed, dict) and cp_indexed.get("gt_ge2") is not None:
+    if isinstance(cp_indexed, dict) and cp_indexed.get("error"):
+        print(f"  outcomes: indexing unavailable — {cp_indexed['error']}")
+    elif isinstance(cp_indexed, dict) and cp_indexed.get("gt_ge2") is not None:
         print(f"  outcomes: indexed {cp_indexed.get('tool_parts', 0)} tool parts "
               f"({cp_indexed.get('gt_ge2', 0)} ground-truth)")
     if isinstance(cp.get("usage_repaired"), dict):
