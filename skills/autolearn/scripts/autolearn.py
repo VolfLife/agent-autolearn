@@ -1592,11 +1592,9 @@ def cmd_search_init(args):
         SELECT sm.id AS msg_id, sm.session_id, sm.type AS role,
                sm.time_created, sm.data AS msg_data
         FROM session_message sm
-        WHERE sm.time_created > ? OR (sm.time_created = ? AND sm.id > ?)
+        WHERE (sm.time_created > ? OR (sm.time_created = ? AND sm.id > ?))
+        ORDER BY sm.time_created ASC, sm.id ASC
     """
-    if has_v1_message_table:
-        v2_sql += "  AND NOT EXISTS (SELECT 1 FROM message m WHERE m.id = sm.id)\n"
-    v2_sql += "        ORDER BY sm.time_created ASC, sm.id ASC"
     try:
         v2_cursor = db_conn.execute(v2_sql, [last_v2_time, last_v2_time, last_v2_id])
     except sqlite3.OperationalError:
@@ -1607,6 +1605,12 @@ def cmd_search_init(args):
         v2_high_time = int(row["time_created"] or 0)
         v2_high_id = str(row["msg_id"])
         v2_max_time = v2_high_time
+        # In hybrid databases, v1 text rows were already indexed above.
+        # Still advance the v2 cursor past mirrored rows to avoid rescanning.
+        if has_v1_message_table and db_conn.execute(
+            "SELECT 1 FROM message WHERE id = ?", [row["msg_id"]]
+        ).fetchone():
+            continue
         if row["role"] not in ("user", "assistant"):
             continue
         try:
