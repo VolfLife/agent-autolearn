@@ -392,7 +392,7 @@ class OutcomeIndex:
                 out = state.get("output")
                 peek = _peek(out if isinstance(out, str) else json.dumps(out, ensure_ascii=False))
                 tool = data.get("tool") or "unknown"
-                skill_name = inp.get("name") if tool == "skill" else None
+                skill_name = (inp.get("name") or inp.get("id")) if tool == "skill" else None
                 gt = classify_gt(tool, status, inp, peek, meta_exit=meta_exit)
                 tool_rows.append((
                     pid, session_id, message_id, ts, ts, tool, status,
