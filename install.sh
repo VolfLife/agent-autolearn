@@ -89,6 +89,10 @@ for executable in ('opencode2', 'opencode'):
     except (OSError, subprocess.SubprocessError):
         pass
 is_opencode_v2 = opencode_major is not None and opencode_major >= 2
+if is_opencode_v2:
+    legacy_plugin_file = os.path.join(os.path.dirname(path), 'plugins', 'autolearn.js')
+    if os.path.exists(legacy_plugin_file):
+        os.remove(legacy_plugin_file)
 
 if os.path.exists(path):
     with open(path) as f:
