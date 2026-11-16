@@ -1577,7 +1577,7 @@ def cmd_search_init(args):
     # Messages mirrored into the v1 `message` table are already indexed by
     # the v1 loop above — skip them here to avoid double-indexing.
     v2_count = 0
-    v2_max_time = last_v2_mark
+    v2_max_time = last_v2_time
     has_v1_message_table = has_v1_source
 
     v2_sql = """
@@ -1598,6 +1598,7 @@ def cmd_search_init(args):
     for row in (v2_cursor or []):
         v2_high_time = int(row["time_created"] or 0)
         v2_high_id = str(row["msg_id"])
+        v2_max_time = v2_high_time
         if row["role"] not in ("user", "assistant"):
             continue
         try:
