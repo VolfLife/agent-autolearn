@@ -66,10 +66,10 @@ cp -r "$REPO_DIR/skills/autolearn" "$SKILLS_DIR/"
 echo "[3/5] Configuring opencode.json..."
 mkdir -p "$(dirname "$OPENCODE_JSON")"
 
-python3 -c "
+OPENCODE_JSON="$OPENCODE_JSON" python3 - <<'PY'
 import json, os, sys, re, shutil, subprocess
 
-path = '$OPENCODE_JSON'
+path = os.environ["OPENCODE_JSON"]
 
 # OpenCode v2 validates plugin entries against its object-based API. Do not
 # register the legacy v1 function plugin there: it only creates a startup
@@ -226,7 +226,7 @@ if changed:
     print('  Updated ' + path)
 else:
     print('  Already configured (' + path + ')')
-" 2>&1
+PY
 
 # 4. Initialize + bootstrap the registry (migrates legacy memory.md if present)
 echo "[4/5] Initializing autolearn store..."
