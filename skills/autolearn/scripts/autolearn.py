@@ -1471,13 +1471,15 @@ def cmd_search_init(args):
                 ).fetchone()
                 if row:
                     project = row["directory"] if "directory" in row.keys() else ""
+                    if not isinstance(project, str):
+                        project = ""
                     if not project and "project_id" in row.keys() and _opencode_has_table(db_conn, "project"):
                         project_row = db_conn.execute(
                             "SELECT name FROM project WHERE id = ?", [row["project_id"]]
                         ).fetchone()
                         project = (project_row["name"] or "") if project_row else ""
-                    if project and ("/" in project or "\\\\" in project):
-                        project = project.replace("\\\\", "/").rstrip("/").split("/")[-1]
+                    if project and ("/" in project or chr(92) in project):
+                        project = project.replace(chr(92), "/").rstrip("/").split("/")[-1]
                     info = {
                         "title": (row["title"] or "Untitled") if "title" in row.keys() else "Untitled",
                         "project": project or "",
