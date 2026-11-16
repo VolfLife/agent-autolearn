@@ -67,9 +67,28 @@ echo "[3/5] Configuring opencode.json..."
 mkdir -p "$(dirname "$OPENCODE_JSON")"
 
 python3 -c "
-import json, os, sys
+import json, os, sys, re, shutil, subprocess
 
 path = '$OPENCODE_JSON'
+
+# OpenCode v2 validates plugin entries against its object-based API. Do not
+# register the legacy v1 function plugin there: it only creates a startup
+# warning and is not used by the v2 shell.
+opencode_major = None
+for executable in ('opencode2', 'opencode'):
+    resolved = shutil.which(executable)
+    if not resolved:
+        continue
+    try:
+        proc = subprocess.run([resolved, '--version'], capture_output=True,
+                              text=True, timeout=5)
+        match = re.search(r'\\b(\\d+)\\.', (proc.stdout or '') + ' ' + (proc.stderr or ''))
+        if match:
+            opencode_major = int(match.group(1))
+            break
+    except (OSError, subprocess.SubprocessError):
+        pass
+is_opencode_v2 = opencode_major is not None and opencode_major >= 2
 
 if os.path.exists(path):
     with open(path) as f:
@@ -79,18 +98,24 @@ else:
 
 changed = False
 
-# plugin — v1 shell (read by OpenCode v1 via the 'plugin' key; OpenCode v2
-# normalizes the same key, where the v1 function export is expected to fail
-# schema validation with a warning — harmless, the v2 entry below is what
-# v2 actually loads).
-if 'plugin' not in data:
-    data['plugin'] = []
-plugins = data['plugin'] if isinstance(data['plugin'], list) else [data['plugin']]
+# plugin — v1 shell. Keep it only on OpenCode v1; v2 uses the object-based
+# plugin API and must not try to load this legacy function export.
 plugin_entry = './plugins/autolearn.js'
-if plugin_entry not in plugins:
-    plugins.append(plugin_entry)
-    data['plugin'] = plugins
-    changed = True
+legacy_plugins = data.get('plugin', [])
+legacy_plugins = legacy_plugins if isinstance(legacy_plugins, list) else [legacy_plugins]
+if is_opencode_v2:
+    filtered = [p for p in legacy_plugins if p != plugin_entry]
+    if filtered != legacy_plugins:
+        if filtered:
+            data['plugin'] = filtered
+        else:
+            data.pop('plugin', None)
+        changed = True
+else:
+    if plugin_entry not in legacy_plugins:
+        legacy_plugins.append(plugin_entry)
+        data['plugin'] = legacy_plugins
+        changed = True
 
 # plugins — v2 shell (native v2 key; OpenCode v1 ignores unknown top-level
 # keys, so both versions can share this file).
