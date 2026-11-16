@@ -1823,7 +1823,10 @@ def cmd_search_status(args):
     last_v2_row = sconn.execute(
         "SELECT value FROM index_state WHERE key = 'last_v2_message_time'"
     ).fetchone()
-    last_v2_mark = int(last_v2_row["value"]) if last_v2_row else 0
+    try:
+        last_v2_mark = int(str(last_v2_row["value"]).partition("|")[0]) if last_v2_row else 0
+    except ValueError:
+        last_v2_mark = 0
     db_size = SEARCH_DB.stat().st_size if SEARCH_DB.exists() else 0
 
     print("Index status:")
