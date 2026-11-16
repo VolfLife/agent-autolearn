@@ -82,7 +82,7 @@ for executable in ('opencode2', 'opencode'):
     try:
         proc = subprocess.run([resolved, '--version'], capture_output=True,
                               text=True, timeout=5)
-        match = re.search(r'\\b(\\d+)\\.', (proc.stdout or '') + ' ' + (proc.stderr or ''))
+        match = re.search(r'\b(\d+)\.', (proc.stdout or '') + ' ' + (proc.stderr or ''))
         if match:
             opencode_major = int(match.group(1))
             break
