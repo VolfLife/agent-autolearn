@@ -764,9 +764,13 @@ def refresh_context():
 def cmd_memory_add(args):
     ensure_dirs()
     reg = memory_registry()
+    existing = reg.find_by_text(args.content)
     rec = reg.add(args.content, "memory")
     refresh_context()
-    print(f"Memory updated: {rec['text'][:80]}")
+    if existing is not None:
+        print(f"Memory already present; reinforcement refreshed: {rec['text'][:80]}")
+    else:
+        print(f"Memory added: {rec['text'][:80]}")
 
 
 def cmd_memory_remove(args):
