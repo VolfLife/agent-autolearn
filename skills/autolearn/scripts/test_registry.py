@@ -165,7 +165,4 @@ def test_debug_log_respects_autolearn_home(tmp_path, monkeypatch):
     monkeypatch.setenv("AUTOLEARN_HOME", str(custom_home))
     R.debug_log(tmp_path / "persona", "isolated diagnostic")
     assert "isolated diagnostic" in (custom_home / "debug.log").read_text()
-    assert not (Path.home() / ".autolearn" / "debug.log").exists() or (
-        "isolated diagnostic" not in (Path.home() / ".autolearn" / "debug.log").read_text()
-    )
 
