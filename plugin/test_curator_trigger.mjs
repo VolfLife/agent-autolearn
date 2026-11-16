@@ -265,6 +265,29 @@ ok(fakeLines().slice(reviewBeforeF).some((l) => l.includes(bigMarker)), "40 KB r
 
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+console.log("G. Failed reviewer runs are visible and return a failure status")
+
+const failingOc = join(HOME, "fake-oc-failing")
+writeFileSync(failingOc, `#!/bin/sh
+if [ "$1" = "run" ]; then
+  echo '{"type":"error","error":{"message":"Agent not found: autolearn-reviewer"}}'
+fi
+exit 7
+`)
+chmodSync(failingOc, 0o755)
+const failedRun = spawnWrapper(["--curator"], {
+  ...env,
+  AUTOLEARN_HARNESS_BIN: failingOc,
+  encoding: "utf-8",
+  timeout: 15000,
+})
+ok(failedRun.status === 7, "failed reviewer subprocess exit code is propagated")
+const errorLog = readFileSync(join(HOME, "review-errors.log"), "utf-8")
+ok(errorLog.includes("Agent not found: autolearn-reviewer"), "reviewer stdout is preserved in review-errors.log")
+const failedObs = readFileSync(OBS_FILE, "utf-8")
+ok(failedObs.includes('"type":"review_failed"') && failedObs.includes('"trigger":"curator"'), "review_failed observation is appended")
+
 console.log(`\n${passed} passed, ${failed} failed`)
 rmSync(HOME, { recursive: true, force: true })
 process.exit(failed ? 1 : 0)
