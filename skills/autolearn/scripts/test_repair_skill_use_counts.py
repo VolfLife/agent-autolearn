@@ -512,6 +512,12 @@ def test_pruner_uses_validated_index_instead_of_stale_zero_count(isolated_env):
 # OpenCode v2 search index — message content and composite cursor
 # ---------------------------------------------------------------------------
 
+def _open_search_db(path: Path) -> sqlite3.Connection:
+    conn = sqlite3.connect(str(path))
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
 def _make_opencode_v2_search_db(path: Path, messages: list[tuple[str, int, str, str]]) -> None:
     conn = sqlite3.connect(str(path))
     conn.executescript(
@@ -557,7 +563,7 @@ def test_search_init_indexes_v2_messages_and_same_timestamp_incrementally(
     search_db = tmp_path / "search.db"
     monkeypatch.setattr(
         autolearn, "get_search_conn",
-        lambda: sqlite3.connect(str(search_db)),
+        lambda: _open_search_db(search_db),
     )
 
     args = type("Args", (), {"full": True})()
