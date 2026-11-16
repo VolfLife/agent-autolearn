@@ -1337,11 +1337,44 @@ def iso_from_unix_ms(unix_ms: int) -> str:
     return dt.strftime("%Y-%m-%d %H:%M")
 
 
+def _opencode_table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
+    try:
+        return {str(row[1]) for row in conn.execute(f"PRAGMA table_info({table})")}
+    except sqlite3.Error:
+        return {}
+
+
+def _opencode_has_table(conn: sqlite3.Connection, table: str) -> bool:
+    return bool(conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", [table]
+    ).fetchone())
+
+
 def cmd_search_init(args):
     full = getattr(args, "full", False)
     db_conn = get_opencode_conn()
     if not db_conn:
         print(f"OpenCode database not found at {OPENCODE_DB}")
+        sys.exit(1)
+
+    # Detect supported storage before clearing anything. OpenCode v1 stores
+    # text in part/message; v2 stores message content arrays in session_message.
+    has_v1_source = (
+        {"id", "message_id", "session_id", "time_created", "data"}
+        <= _opencode_table_columns(db_conn, "part")
+        and _opencode_has_table(db_conn, "message")
+    )
+    has_v2_source = (
+        {"id", "session_id", "time_created", "data"}
+        <= _opencode_table_columns(db_conn, "session_message")
+        and _opencode_has_table(db_conn, "session_v2")
+    )
+    if not (has_v1_source or has_v2_source):
+        db_conn.close()
+        print(
+            "Unsupported OpenCode database schema: expected legacy part/message "
+            "tables or v2 session_message/session_v2 tables."
+        )
         sys.exit(1)
 
     sconn = get_search_conn()
@@ -1370,46 +1403,82 @@ def cmd_search_init(args):
     def get_session(session_id: str) -> dict:
         if session_id in session_cache:
             return session_cache[session_id]
-        row = None
-        # v2 first: for ids present in both stores, session_v2 carries the
-        # fresher title. The v2 table may be absent on v1-only installs.
-        try:
-            row = db_conn.execute(
-                "SELECT id, title, project_id, time_created FROM session_v2 WHERE id = ?",
-                [session_id],
-            ).fetchone()
-        except sqlite3.OperationalError:
-            row = None
-        if row is None:
-            row = db_conn.execute(
-                "SELECT id, title, project_id, time_created FROM session WHERE id = ?",
-                [session_id],
-            ).fetchone()
-        if row:
-            project_row = db_conn.execute(
-                "SELECT name FROM project WHERE id = ?", [row["project_id"]]
-            ).fetchone()
-            info = {
-                "title": row["title"] or "Untitled",
-                "project": (project_row["name"] or "") if project_row else "",
-                "time_created": row["time_created"],
-            }
-        else:
-            info = {"title": "Untitled", "project": "", "time_created": 0}
+
+        info = {"title": "Untitled", "project": "", "time_created": 0}
+        # V2 builds may store the working directory directly instead of the
+        # v1 project_id foreign key. Inspect columns rather than assuming one
+        # exact beta schema.
+        if _opencode_has_table(db_conn, "session_v2"):
+            cols = _opencode_table_columns(db_conn, "session_v2")
+            selected = ["id", "title", "time_created"]
+            if "directory" in cols:
+                selected.append("directory")
+            if "project_id" in cols:
+                selected.append("project_id")
+            if {"id", "time_created"} <= cols:
+                row = db_conn.execute(
+                    f"SELECT {', '.join(selected)} FROM session_v2 WHERE id = ?",
+                    [session_id],
+                ).fetchone()
+                if row:
+                    project = row["directory"] if "directory" in row.keys() else ""
+                    if not project and "project_id" in row.keys() and _opencode_has_table(db_conn, "project"):
+                        project_row = db_conn.execute(
+                            "SELECT name FROM project WHERE id = ?", [row["project_id"]]
+                        ).fetchone()
+                        project = (project_row["name"] or "") if project_row else ""
+                    if project and ("/" in project or "\\\\" in project):
+                        project = project.replace("\\\\", "/").rstrip("/").split("/")[-1]
+                    info = {
+                        "title": (row["title"] or "Untitled") if "title" in row.keys() else "Untitled",
+                        "project": project or "",
+                        "time_created": row["time_created"] or 0,
+                    }
+
+        # Legacy v1 fallback for installs where session_v2 is absent or has
+        # no matching id.
+        if info["time_created"] == 0 and _opencode_has_table(db_conn, "session"):
+            cols = _opencode_table_columns(db_conn, "session")
+            if {"id", "time_created"} <= cols:
+                selected = ["id", "time_created"]
+                if "title" in cols:
+                    selected.append("title")
+                if "project_id" in cols:
+                    selected.append("project_id")
+                row = db_conn.execute(
+                    f"SELECT {', '.join(selected)} FROM session WHERE id = ?",
+                    [session_id],
+                ).fetchone()
+                if row:
+                    project = ""
+                    if "project_id" in row.keys() and _opencode_has_table(db_conn, "project"):
+                        project_row = db_conn.execute(
+                            "SELECT name FROM project WHERE id = ?", [row["project_id"]]
+                        ).fetchone()
+                        project = (project_row["name"] or "") if project_row else ""
+                    info = {
+                        "title": (row["title"] or "Untitled") if "title" in row.keys() else "Untitled",
+                        "project": project,
+                        "time_created": row["time_created"] or 0,
+                    }
+
         session_cache[session_id] = info
         return info
 
-    rows = db_conn.execute(
-        """
-        SELECT p.id AS part_id, p.message_id, p.session_id,
-               p.time_created, p.data AS part_data, m.data AS msg_data
-        FROM part p
-        JOIN message m ON m.id = p.message_id
-        WHERE p.time_created > ?
-        ORDER BY p.time_created ASC
-        """,
-        [last_mark],
-    )
+    if has_v1_source:
+        rows = db_conn.execute(
+            """
+            SELECT p.id AS part_id, p.message_id, p.session_id,
+                   p.time_created, p.data AS part_data, m.data AS msg_data
+            FROM part p
+            JOIN message m ON m.id = p.message_id
+            WHERE p.time_created > ?
+            ORDER BY p.time_created ASC, p.id ASC
+            """,
+            [last_mark],
+        )
+    else:
+        rows = []
 
     count = 0
     max_time = last_mark
@@ -1460,15 +1529,7 @@ def cmd_search_init(args):
     # the v1 loop above — skip them here to avoid double-indexing.
     v2_count = 0
     v2_max_time = last_v2_mark
-    has_v1_message_table = False
-    try:
-        has_v1_message_table = bool(
-            db_conn.execute(
-                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'message'"
-            ).fetchone()
-        )
-    except sqlite3.OperationalError:
-        pass
+    has_v1_message_table = has_v1_source
 
     v2_sql = """
         SELECT sm.id AS msg_id, sm.session_id, sm.type AS role,
